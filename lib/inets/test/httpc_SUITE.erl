@@ -229,7 +229,9 @@ misc() ->
      post_204_chunked,
      head_chunked_empty_body,
      head_empty_body,
-     chunkify_fun
+     chunkify_fun,
+     connect_tunnel_minimal_headers,
+     connect_tunnel_proxy_auth_headers
     ].
 
 sim_mixed() ->
@@ -1996,6 +1998,68 @@ chunkify_receive() ->
             ct:fail("Timeout: did not receive packet")
     end.
 %%--------------------------------------------------------------------
+connect_tunnel_minimal_headers() ->
+    [{doc, "Test that CONNECT requests only include Host and Proxy-Connection headers"}].
+connect_tunnel_minimal_headers(Config) when is_list(Config) ->
+    {ok, ListenSocket} = gen_tcp:listen(0, [binary, {active, false},
+                                            {reuseaddr, true}]),
+    {ok, {_, ProxyPort}} = inet:sockname(ListenSocket),
+    ok = httpc:set_options([{https_proxy, {{"localhost", ProxyPort}, []}}],
+                           ?profile(Config)),
+    %% Make HTTPS request through the proxy
+    spawn_link(fun() ->
+        httpc:request(get, {"https://example.test:8443/path", []},
+                      [{ssl, [{verify, verify_none}]}, {timeout, 5000}],
+                      [], ?profile(Config))
+    end),
+    {ok, Socket} = gen_tcp:accept(ListenSocket, 5000),
+    {ok, Data} = gen_tcp:recv(Socket, 0, 5000),
+    gen_tcp:close(Socket),
+    gen_tcp:close(ListenSocket),
+    %% Parse and validate the CONNECT request headers
+    {Headers, Method, URI} = parse_connect_request(Data),
+    "CONNECT" = Method,
+    "example.test:8443" = URI,
+    %% Host must include port
+    "example.test:8443" = proplists:get_value("host", Headers),
+    %% Proxy-Connection should be present
+    "Keep-Alive" = proplists:get_value("proxy-connection", Headers),
+    %% These headers must NOT be present
+    undefined = proplists:get_value("content-length", Headers),
+    undefined = proplists:get_value("pragma", Headers),
+    undefined = proplists:get_value("te", Headers),
+    undefined = proplists:get_value("connection", Headers),
+    ok.
+
+%%--------------------------------------------------------------------
+connect_tunnel_proxy_auth_headers() ->
+    [{doc, "Test that CONNECT requests include Proxy-Authorization when configured"}].
+connect_tunnel_proxy_auth_headers(Config) when is_list(Config) ->
+    {ok, ListenSocket} = gen_tcp:listen(0, [binary, {active, false},
+                                            {reuseaddr, true}]),
+    {ok, {_, ProxyPort}} = inet:sockname(ListenSocket),
+    ok = httpc:set_options([{https_proxy, {{"localhost", ProxyPort}, []}}],
+                           ?profile(Config)),
+    spawn_link(fun() ->
+        httpc:request(get, {"https://example.test:8443/path", []},
+                      [{ssl, [{verify, verify_none}]}, {timeout, 5000},
+                       {proxy_auth, {"user", "pass"}}],
+                      [], ?profile(Config))
+    end),
+    {ok, Socket} = gen_tcp:accept(ListenSocket, 5000),
+    {ok, Data} = gen_tcp:recv(Socket, 0, 5000),
+    gen_tcp:close(Socket),
+    gen_tcp:close(ListenSocket),
+    {Headers, _Method, _URI} = parse_connect_request(Data),
+    %% Proxy-Authorization should be present
+    "Basic " ++ _ = proplists:get_value("proxy-authorization", Headers),
+    %% These headers must NOT be present
+    undefined = proplists:get_value("content-length", Headers),
+    undefined = proplists:get_value("pragma", Headers),
+    undefined = proplists:get_value("connection", Headers),
+    ok.
+
+%%--------------------------------------------------------------------
 stream_fun_server_close() ->
     [{doc, "Test that an error msg is received when using a receiver fun as stream target"}].
 stream_fun_server_close(Config) when is_list(Config) ->
@@ -3667,9 +3731,25 @@ receive_stream_n(Ref, N) ->
 	    receive_stream_n(Ref, N-1)
     end.
 
+parse_connect_request(Data) ->
+    Lines = string:split(binary_to_list(Data), "\r\n", all),
+    [RequestLine | HeaderLines] = Lines,
+    [Method, URI, _Version] = string:split(RequestLine, " ", all),
+    Headers = lists:filtermap(
+                fun("") -> false;
+                   (Line) ->
+                        case string:split(Line, ": ", leading) of
+                            [Key, Value] ->
+                                {true, {string:lowercase(Key), Value}};
+                            _ ->
+                                false
+                        end
+                end, HeaderLines),
+    {Headers, Method, URI}.
+
 is_ipv6_supported() ->
     {ok, Hostname0} = inet:gethostname(),
-    try 
+    try
         lists:member(list_to_atom(Hostname0), ct:get_config(ipv6_hosts))
     catch
          _: _ ->

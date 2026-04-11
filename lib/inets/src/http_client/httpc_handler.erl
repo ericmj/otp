@@ -1580,8 +1580,7 @@ tls_tunnel(Address, Request, #state{session = #session{} = Session} = State,
 	   ErrorHandler(Request, State, Reason)
     end.
 
-tls_tunnel_request(#request{headers = Headers, 
-			     settings = Options,
+tls_tunnel_request(#request{settings = Options,
 			     id = RequestId,
 			     from = From,
 			     address =  {Host, Port}= Adress,
@@ -1597,9 +1596,10 @@ tls_tunnel_request(#request{headers = Headers,
        path = URI,
        pquery  = "",
        method = connect,
-       headers = #http_request_h{host = host_header(Headers, URI),
-				 pragma = "no-cache",
-				 other = [{"Proxy-Connection", " Keep-Alive"}]},
+       headers = #http_request_h{host = URI,
+				 connection = undefined,
+				 'content-length' = undefined,
+				 other = [{"Proxy-Connection", "Keep-Alive"}]},
        settings = Options,
        abs_uri = URI,
        stream = false,
@@ -1610,13 +1610,6 @@ tls_tunnel_request(#request{headers = Headers,
        request_options = ReqOptions       
       }.
 
-host_header(#http_request_h{host = Host}, _) ->
-    Host;
-
-%% Handles headers_as_is
-host_header(_, URI) ->
-    #{host := Host} = uri_string:parse(URI),
-    Host.
 
 tls_upgrade(#state{status = 
 		       {ssl_tunnel, 
